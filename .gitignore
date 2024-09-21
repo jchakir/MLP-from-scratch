@@ -1,3 +1,5 @@
 __pycache__
 model.metadata
 model.npz
+data/test-data.csv
+data/train-data.csv
