@@ -1,5 +1,5 @@
 import math
-from typing import NoReturn, Iterator, Any, Literal
+from typing import NoReturn, Iterator, Any, Literal, TypeAlias
 
 import numpy as np
 
@@ -214,80 +214,115 @@ class Sequential:
         x: np.ndarray,
         y: np.ndarray,
         *,
-        batch_size=100,
-        epochs=13,
+        batch_size : int = 100,
+        epochs : int = 13,
         x_val: np.ndarray | None = None,
         y_val: np.ndarray | None = None,
-        val_split=0.2,
-        early_stop=False,
-        early_stop_patience=1,
-        verbose=1,
+        val_split : float = 0.0,
+        enable_metrics: bool = False,
+        early_stop : bool = False,
+        early_stop_patience : int = 1,
+        verbose : int = 1,
     ) -> History:
+
+        history: History = History()
+        val_data_exist: bool = False
+        batch_count = math.ceil(x.shape[0] / batch_size)
+        best_val_loss: float = float("inf")
+        remaining_patience: int = early_stop_patience
+        epochs_str = loss_acc_str = early_stop_str = ""
 
         if self.__loaded and not self.__compiled:
             raise Exception(
                 "Sequential: "
                 "the model is loaded from npz file.\n"
-                "recomended to use .compile before fit (train again) to adapt learning rate, beta1, beta2, ....\n"
+                "recomended to use .compile before fit (train again) "
+                "to adapt learning rate, beta1, beta2, ....\n"
                 f"use '{self.__loss_name}' as loss\n"
                 f"optimizer of loaded model is '{self.__optimizer}', "
                 "without .compile, default optimizer is gradient descent (gd)"
             )
+
         if not self.__compiled:
             raise Exception('Sequential: model not compiled yet, use .compile before fit')
 
+        assert 0 <= val_split < 1, Exception(
+            "Sequential: validation split (val_split)"
+            " shall between 0 and 1, (0 <= val_split < 1)"
+        )
+
         if x_val is None or y_val is None:
-            x, y, x_val, y_val = self.__split_validation_data(x, y, val_split)
+            if val_split != 0:
+                x, y, x_val, y_val = self.__split_validation_data(x, y, val_split)
+                assert y.ndim == y_val.ndim == 2, Exception("Sequential: y and y_val shall be in 2 dimentions")
+                val_data_exist = True
+            elif early_stop:
+                raise Exception("Sequential: cannot enable early stop with no validation data")
+        else:
+            assert y.ndim == y_val.ndim == 2, Exception("Sequential: y and y_val shall be in 2 dimentions")
+            val_data_exist = True
 
-        if y.ndim != 2 and y_val.ndim != 2:
-            raise Exception("Sequential: y and y_val shall be in 2 dimentions")
-
-        history = History()
-
-        def __loss_matric_history(y: np.ndarray, yHat: np.ndarray) -> Metrics:
-            yHat_val = self.__forward(x_val, train=False)
+        def __get_loss_matric_history_train_only(y: np.ndarray, yHat: np.ndarray) -> tuple[float, float]:
             train_loss = self.__loss.loss(y, yHat)
-            val_loss = self.__loss.loss(y_val, yHat_val)
-            metrics = self.__loss.metrics(y, yHat)
-            val_metrics = self.__loss.metrics(y_val, yHat_val)
+            history.add_loss(train_loss)
+            if enable_metrics:
+                metrics = self.__loss.metrics(y, yHat)
+                history.add_metrics(metrics)
+                return train_loss, metrics[0]
+            return train_loss, 0.0
+
+        def __get_loss_matric_history_train_and_validation(y: np.ndarray, yHat: np.ndarray) -> Metrics:
+            yHat_val = self.__forward(x_val, train=False) # type: ignore
+            train_loss = self.__loss.loss(y, yHat)
+            val_loss = self.__loss.loss(y_val, yHat_val) # type: ignore
             history.add_loss(train_loss)
             history.add_val_loss(val_loss)
-            history.add_metrics(metrics)
-            history.add_val_metrics(val_metrics)
-            return train_loss, val_loss, metrics[0], val_metrics[0]
+            if enable_metrics:
+                metrics = self.__loss.metrics(y, yHat)
+                val_metrics = self.__loss.metrics(y_val, yHat_val) # type: ignore
+                history.add_metrics(metrics)
+                history.add_val_metrics(val_metrics)
+                return train_loss, val_loss, metrics[0], val_metrics[0]
+            return train_loss, val_loss, 0.0, 0.0
 
-        batch_count = math.ceil(x.shape[0] / batch_size)
-        best_val_loss: float = float("inf")
-        early_stop_str: str = ""
-        epochs_str = batch_str = loss_str = accuracy_str = ""
-        remaining_patience: int = early_stop_patience
-        train_loss = val_loss = accuracy = val_accuracy = 0
+        def __handle_loss_accuracy_history_verbose_str(y: np.ndarray, yHat: np.ndarray) -> tuple[str, float]:
+            if val_data_exist:
+                los, v_los, acc, v_acc = __get_loss_matric_history_train_and_validation(y, yHat)
+                verbose_str = f"loss: {los:.9f}  val_loss: {v_los:.9f}"
+                if enable_metrics:
+                    verbose_str += f"  accuracy: {acc:.9f}  val_accuracy: {v_acc:.9f}"
+            else:
+                los, acc = __get_loss_matric_history_train_only(y, yHat)
+                verbose_str  = f"loss: {los:.9f}"
+                if enable_metrics:
+                    verbose_str += f"  accuracy: {acc:.9f}"
+                v_los = best_val_loss
+            return verbose_str, v_los
+
         for epoch in range(epochs):
             for id, xb, yb, size in self.__batches(x, y, batch_size):
                 yHat = self.__forward(xb, train=True)
                 gradient = self.__loss.derivative(yb, yHat, size)
                 self.__backward(gradient)
 
-                train_loss, val_loss, accuracy, val_accuracy = __loss_matric_history(yb, yHat)
+                loss_acc_str, val_loss = __handle_loss_accuracy_history_verbose_str(yb, yHat)
                 if early_stop:
                     early_stop_status, remaining_patience = self.__early_stopping(
                         val_loss, best_val_loss, early_stop_patience, remaining_patience
                     )
-                    early_stop_str = f"early_stop: {early_stop_status}"
+                    early_stop_str = f" early_stop: {early_stop_status}"
                     best_val_loss = val_loss
                     if early_stop_status == "breaking":
                         pass
 
                 epochs_str = f"{epoch: 4}/{epochs}"
                 batch_str = f"({id: 4}/{batch_count})"
-                loss_str = f"loss: {train_loss:.9f}  val_loss: {val_loss:.9f}"
-                accuracy_str = f"accuracy: {accuracy:.9f}  val_accuracy: {val_accuracy:.9f}"
 
                 if verbose == 2:
-                    print(f"{epochs_str} {batch_str}  {loss_str} {accuracy_str} {early_stop_str}")
+                    print(f"{epochs_str} {batch_str}  {loss_acc_str}{early_stop_str}")
 
             if verbose == 1:
-                print(f"{epochs_str} ({batch_count})  {loss_str} {accuracy_str} {early_stop_str}")
+                print(f"{epochs_str} ({batch_count})  {loss_acc_str}{early_stop_str}")
 
         return history
 
