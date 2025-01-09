@@ -159,7 +159,7 @@ class Sequential:
         yHat = self.__forward(x, train=False)
         loss = self.__loss.loss(y, yHat)
         m1, m2, m3, m4 = self.__loss.metrics(y, yHat)
-        match self.__loss.loss_name:
+        match self.__loss_name:
             case "mse":
                 return {
                     'loss': loss,
@@ -183,17 +183,24 @@ class Sequential:
                 }
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        return self.__forward(x, train=False)
+        y_pred = self.__forward(x, train=False)
+        match self.__loss_name:
+            case "mse":
+                return y_pred.reshape(-1)
+            case "binarycrossentropy":
+                return y_pred.reshape(-1)
+            case "crossentropy":
+                return y_pred
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         y_pred = self.__forward(x, train=False)
-        match self.__loss.loss_name:
+        match self.__loss_name:
             case "mse":
-                return y_pred
+                return y_pred.reshape(-1)
             case "binarycrossentropy":
-                return (y_pred > 0.5).astype(int)
+                return (y_pred > 0.5).astype(int).reshape(-1)
             case "crossentropy":
-                return y_pred.argmax(axis=1)
+                return y_pred.argmax(axis=1).reshape(-1)
 
     def compile(
         self, *,
